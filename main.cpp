@@ -7,50 +7,61 @@
 
 const TGAColor white = TGAColor(255, 255, 255, 255);
 const TGAColor red = TGAColor(255, 0, 0, 255);
+const TGAColor green = TGAColor(0, 255, 0, 255);
 
 Model *model = NULL;
-const int width = 1600;
-const int height = 1600;
+const int width = 800;
+const int height = 800;
 
 // 画一条 (x0, y0) 到 (x1, y1) 的 color 颜色的线段
-void line(int x0, int y0, int x1, int y1, TGAImage &image, TGAColor color) {
+void line(Vec2i p0, Vec2i p1, TGAImage &image, TGAColor color) {
   bool steep = false;
-  // 如果线段比较陡峭（斜率大），则交换横纵坐标
-  // 想象一下，假设一条线段的斜率非常大，举个例子，x0=2，x1=4；但是y0=3，y1=300。则使用下面循环插值时，实际上就画了三个点，中间会有很大的缝隙
-  if (std::abs(x0 - x1) < std::abs(y0 - y1)) {
-    std::swap(x0, y0);
-    std::swap(x1, y1);
+  if (std::abs(p0.x - p1.x) < std::abs(p0.y - p1.y)) {
+    std::swap(p0.x, p0.y);
+    std::swap(p1.x, p1.y);
     steep = true;
   }
-  // 确保(x0, y0)是处于左边的点
-  if (x0 > x1) {
-    std::swap(x0, x1);
-    std::swap(y0, y1);
+  if (p0.x > p1.x) {
+    std::swap(p0, p1);
   }
-  // 起点与终点的横纵坐标插值
-  int dx = x1 - x0;
-  int dy = y1 - y0;
 
-  // 这并没有什么意义，意义在于下面的if中的比较
-  int derror2 = std::abs(dy) * 2;
-  int error2 = 0;
-  // 先将要画的点赋值为起点
-  int y = y0;
-  for (int x = x0; x <= x1; x++) {
-    // 如果比较陡峭，证明交换过，这次再交换回来
+  for (int x = p0.x; x <= p1.x; x++) {
+    float t = (x - p0.x) / (float)(p1.x - p0.x);
+    int y = p0.y * (1. - t) + p1.y * t;
     if (steep) {
       image.set(y, x, color);
     } else {
       image.set(x, y, color);
     }
-    error2 += derror2;
-    // if (k*(dy/dx)>1/2)
-    // 等价于下面的式子，也就是如果斜率累积大于0.5，就应该移动像素了
-    if (error2 > dx) {
-      // 在纵坐标（也可能是交换过后的横坐标）进行移动
-      y += (y1 > y0 ? 1 : -1);
-      // k*(dy/dx) -= 1
-      error2 -= dx * 2;
+  }
+}
+
+// 计算点p的重心坐标
+Vec3f barycentric(Vec2i *pts, Vec2i P) {
+  Vec3f u = Vec3f(pts[2].x - pts[0].x, pts[1].x - pts[0].x, pts[0].x - P.x) ^
+            Vec3f(pts[2].y - pts[0].y, pts[1].y - pts[0].y, pts[0].y - P.y);
+  if (std::abs(u.z) < 1) return Vec3f(-1, 1, 1);
+  return Vec3f(1.0 - (u.x + u.y) / u.z, u.y / u.z, u.x / u.z);
+}
+
+// 画一个三角形
+void triangle(Vec2i *pts, TGAImage &image, TGAColor color) {
+  Vec2i bboxmin(image.get_width() - 1, image.get_height() - 1);
+  Vec2i bboxmax(0, 0);
+  Vec2i clamp(image.get_width() - 1, image.get_height() - 1);
+  for (int i = 0; i < 3; i++) {
+    bboxmin.x = std::max(0, std::min(bboxmin.x, pts[i].x));
+    bboxmin.y = std::max(0, std::min(bboxmin.y, pts[i].y));
+
+    bboxmax.x = std::min(clamp.x, std::max(bboxmax.x, pts[i].x));
+    bboxmax.y = std::min(clamp.y, std::max(bboxmax.y, pts[i].y));
+  }
+  Vec2i P;
+  for (P.x = bboxmin.x; P.x <= bboxmax.x; P.x++) {
+    for (P.y = bboxmin.y; P.y <= bboxmax.y; P.y++) {
+      Vec3f bc_screen = barycentric(pts, P);
+      if (bc_screen.x < 0 || bc_screen.y < 0 || bc_screen.z < 0) continue;
+      image.set(P.x, P.y, color);
     }
   }
 }
@@ -59,20 +70,28 @@ int main() {
   model = new Model("obj/african_head.obj");
   TGAImage image(width, height, TGAImage::RGB);
 
-  // 遍历面片
+  Vec3f light_dir(0, 0, -1);  // define light_dir
+
   for (int i = 0; i < model->nfaces(); i++) {
-    // 获取面片
     std::vector<int> face = model->face(i);
+    Vec2i screen_coords[3];
+    Vec3f world_coords[3];
     for (int j = 0; j < 3; j++) {
-      // 获取面片三角形的两点，该两点之间有连边
-      Vec3f v0 = model->vert(face[j]);
-      Vec3f v1 = model->vert(face[(j + 1) % 3]);
-      // 因为坐标范围为 [-1, 1]，因此 +1 以后 除以 2，转换为范围 [0, 1]，最后乘上 width/height
-      int x0 = (v0.x + 1.0) * width / 2.0;
-      int y0 = (v0.y + 1.0) * height / 2.0;
-      int x1 = (v1.x + 1.0) * width / 2.0;
-      int y1 = (v1.y + 1.0) * height / 2.0;
-      line(x0, y0, x1, y1, image, white);
+      Vec3f v = model->vert(face[j]);
+      screen_coords[j] =
+          Vec2i((v.x + 1.) * width / 2.0, (v.y + 1.0) * height / 2.0);
+      world_coords[j] = v;
+    }
+    // 计算法线
+    Vec3f n = (world_coords[2] - world_coords[0]) ^
+              (world_coords[1] - world_coords[0]);
+    n.normalize();
+    // 法线在光线方向的分量，垂直于光线方向的话就是1
+    float intensity = n * light_dir;
+    if (intensity > 0) {
+      triangle(
+          screen_coords, image,
+          TGAColor(intensity * 255, intensity * 255, intensity * 255, 255));
     }
   }
 
